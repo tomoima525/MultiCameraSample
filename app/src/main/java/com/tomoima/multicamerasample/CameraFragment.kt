@@ -3,9 +3,7 @@ package com.tomoima.multicamerasample
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.graphics.Matrix
-import android.graphics.Point
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraAccessException
@@ -17,6 +15,8 @@ import android.util.Log
 import android.util.Size
 import android.view.*
 import android.widget.TextView
+import kotlinx.android.synthetic.main.fragment_camera.*
+import com.tomoima.multicamerasample.models.CameraIdInfo
 import com.tomoima.multicamerasample.services.Camera
 import com.tomoima.multicamerasample.ui.AutoFitTextureView
 import com.tomoima.multicamerasample.ui.ConfirmationDialog
@@ -47,25 +47,15 @@ class CameraFragment : Fragment() {
 
     }
 
-    private lateinit var camera1View: AutoFitTextureView
-    private lateinit var multiCameraSupportValueTv: TextView
-
     private var camera: Camera? = null
 
     private lateinit var previewSize: Size
-
 
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View? = inflater.inflate(R.layout.fragment_camera, container, false)
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-        camera1View = view.findViewById(R.id.camera1_view)
-        multiCameraSupportValueTv = view.findViewById(R.id.multi_camera_support_value)
-    }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
@@ -135,11 +125,26 @@ class CameraFragment : Fragment() {
                 val texture = camera1View.surfaceTexture
                 texture.setDefaultBufferSize(previewSize.width, previewSize.height)
                 it.start(Surface(texture))
+                updateCameraStatus(it.getCamerIds())
             }
         } catch (e: CameraAccessException) {
             Log.e(TAG, e.toString())
         } catch (e: InterruptedException) {
             throw RuntimeException("Interrupted while trying to lock camera opening.", e)
+        }
+    }
+
+    private fun updateCameraStatus(cameraIdInfo: CameraIdInfo) {
+        val (logicalCameraId, physicalCameraIds) = cameraIdInfo
+        if(logicalCameraId.isNotEmpty()) {
+            multiCameraSupportTv.text = "YES"
+            logicalCameraTv.text = "[$logicalCameraId]"
+        }
+        if(physicalCameraIds.isNotEmpty()) {
+            physicalCameraTv.text = physicalCameraIds
+                .asSequence()
+                .map { s -> "[$s]" }
+                .reduce { acc, s -> "$acc,$s" }
         }
     }
 
