@@ -14,13 +14,13 @@ import android.support.v4.content.ContextCompat
 import android.util.Log
 import android.util.Size
 import android.view.*
-import android.widget.TextView
+import android.widget.SeekBar
 import kotlinx.android.synthetic.main.fragment_camera.*
 import com.tomoima.multicamerasample.models.CameraIdInfo
 import com.tomoima.multicamerasample.services.Camera
-import com.tomoima.multicamerasample.ui.AutoFitTextureView
 import com.tomoima.multicamerasample.ui.ConfirmationDialog
 import com.tomoima.multicamerasample.ui.ErrorDialog
+import kotlin.math.roundToInt
 
 class CameraFragment : Fragment() {
 
@@ -57,10 +57,38 @@ class CameraFragment : Fragment() {
         savedInstanceState: Bundle?
     ): View? = inflater.inflate(R.layout.fragment_camera, container, false)
 
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        zoomBar.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener {
+            var progressValue = 0
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                this.progressValue = progress
+                camera?.maxZoom?.let {
+                    val zoomValue = progressValue.toDouble()/seekBar.max * it
+                    camera?.setZoom(zoomValue)
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {
+            }
+
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+            }
+
+        })
+    }
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
         val manager = activity!!.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         camera = Camera.initInstance(manager)
+        // set Seek bar zoom
+        camera?.maxZoom?.let {
+            val actualProgress = (100 / it).roundToInt()
+            Log.d(TAG, "===== actual $actualProgress")
+            zoomBar.progress = actualProgress
+        }
     }
 
     override fun onResume() {
@@ -117,6 +145,10 @@ class CameraFragment : Fragment() {
 
         try {
             camera?.let {
+                // Usually preview size has to be calculated based on the sensor rotation using getImageOrientation()
+                // so that the sensor rotation and image rotation aspect matches correctly.
+                // In this sample app, we know that Pixel series has the 90 degrees of sensor rotation,
+                // so we just consider that width/ height < 1, which means portrait.
                 val aspectRatio: Float = width / height.toFloat()
                 previewSize = it.getPreviewSize(aspectRatio)
                 camera1View.setAspectRatio(previewSize.height, previewSize.width)
@@ -125,7 +157,7 @@ class CameraFragment : Fragment() {
                 val texture = camera1View.surfaceTexture
                 texture.setDefaultBufferSize(previewSize.width, previewSize.height)
                 it.start(Surface(texture))
-                updateCameraStatus(it.getCamerIds())
+                updateCameraStatus(it.getCameraIds())
             }
         } catch (e: CameraAccessException) {
             Log.e(TAG, e.toString())
