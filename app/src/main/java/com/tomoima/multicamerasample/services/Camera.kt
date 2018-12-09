@@ -4,6 +4,8 @@ import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.hardware.camera2.*
 import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM
+import android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
 import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
 import android.media.ImageReader
@@ -11,15 +13,16 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.support.v4.math.MathUtils.clamp
 import android.util.Log
-import android.util.Size
 import android.util.SparseIntArray
 import android.view.OrientationEventListener
 import android.view.Surface
-import com.tomoima.multicamerasample.extensions.*
+import com.tomoima.multicamerasample.extensions.getCaptureSize
+import com.tomoima.multicamerasample.extensions.getPreviewSize
+import com.tomoima.multicamerasample.extensions.isAutoExposureSupported
+import com.tomoima.multicamerasample.extensions.isContinuousAutoFocusSupported
 import com.tomoima.multicamerasample.models.CameraIdInfo
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-
 
 private const val TAG = "CAMERA"
 
@@ -38,13 +41,6 @@ val ORIENTATIONS = SparseIntArray().apply {
     append(Surface.ROTATION_270, 180)
 }
 
-enum class WBMode {
-    AUTO, SUNNY, INCANDECENT
-}
-
-private const val MAX_PREVIEW_WIDTH = 1920
-private const val MAX_PREVIEW_HEIGHT = 1080
-
 interface ImageHandler {
     fun handleImage(image: Image): Runnable
 }
@@ -53,12 +49,7 @@ interface OnFocusListener {
     fun onFocusStateChanged(focusState: Int)
 }
 
-/**
- * Listener interface that will send back the newly created [Size] of our camera output
- */
-interface OnViewportSizeUpdatedListener {
-    fun onViewportSizeUpdated(viewportWidth: Int, viewportHeight: Int)
-}
+private const val ZOOM_SCALE = 1.00
 
 /**
  * Controller class that operates Non-UI Camera activity
@@ -99,14 +90,18 @@ class Camera constructor(private val cameraManager: CameraManager) {
     private val openLock = Semaphore(1)
 
     private var cameraDevice: CameraDevice? = null
+
     /**
      * An [ImageReader] that handles still image capture.
      */
     private var imageReader: ImageReader? = null
+
     /**
      * A [CameraCaptureSession] for camera preview.
      */
     private var captureSession: CameraCaptureSession? = null
+
+    private var requestBuilder: CaptureRequest.Builder? = null
 
     private var focusListener: OnFocusListener? = null
     /**
@@ -117,7 +112,14 @@ class Camera constructor(private val cameraManager: CameraManager) {
     private var state = State.PREVIEW
     private var aeMode = CaptureRequest.CONTROL_AE_MODE_ON
     private var preAfState: Int? = null
-    var wbMode: WBMode = WBMode.AUTO
+
+    // Zoom related variables
+    // Zoom Crop Area
+    private val activeArraySize: Rect
+    // Zoom value 0.00 - 1.00
+    private var zoomValue: Double = ZOOM_SCALE
+    val maxZoom: Double
+
     /**
      * A [Handler] for running tasks in the background.
      */
@@ -130,11 +132,12 @@ class Camera constructor(private val cameraManager: CameraManager) {
     private var isClosed = true
     var deviceRotation: Int = 0 // Device rotation is defined by Screen Rotation
 
-    var viewPortSizeListener: OnViewportSizeUpdatedListener? = null
-
     init {
         cameraId = setUpCameraId(manager = cameraManager)
         characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        activeArraySize = characteristics.get(SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect()
+        maxZoom = characteristics.get(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)?.toDouble() ?: ZOOM_SCALE
+        Log.d(TAG, "CameraID($cameraId) -> maxZoom $maxZoom")
     }
 
     // Callbacks
@@ -297,11 +300,9 @@ class Camera constructor(private val cameraManager: CameraManager) {
         }
 
         if (isClosed) return
-        imageReader?.setOnImageAvailableListener(object : ImageReader.OnImageAvailableListener {
-            override fun onImageAvailable(reader: ImageReader) {
-                val image = reader.acquireNextImage()
-                backgroundHandler?.post(handler.handleImage(image = image))
-            }
+        imageReader?.setOnImageAvailableListener({ reader ->
+            val image = reader.acquireNextImage()
+            backgroundHandler?.post(handler.handleImage(image = image))
         }, backgroundHandler)
 
         lockFocus()
@@ -323,6 +324,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
             imageReader?.close()
             imageReader = null
             stopBackgroundHandler()
+            zoomValue = ZOOM_SCALE
         } catch (e: InterruptedException) {
             Log.e(TAG, "Error closing camera $e")
         } finally {
@@ -330,191 +332,28 @@ class Camera constructor(private val cameraManager: CameraManager) {
         }
     }
 
-    fun getCamerIds(): CameraIdInfo = CameraIdInfo(cameraId, physicalCameraIds.toList())
+    fun getCameraIds(): CameraIdInfo = CameraIdInfo(cameraId, physicalCameraIds.toList())
 
-    // internal methods
+    // Zooming
 
-    /**
-     * Set up camera Id from id list
-     */
-    private fun setUpCameraId(manager: CameraManager): String {
-        for (cameraId in manager.cameraIdList) {
-            val characteristics = manager.getCameraCharacteristics(cameraId)
-            // Usually cameraId = 0 is logical camera, so we check that
-            val capabilities = characteristics.get(
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
-            )
-            val isLogicalCamera = capabilities.contains(
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
-            )
-            if (isLogicalCamera) {
-                this.physicalCameraIds = characteristics.physicalCameraIds
-                return cameraId
-            }
+    /** Sets the digital zoom. Must be called while the preview is active.  */
+    fun setZoom(zoomValue: Double) {
+        if (zoomValue > maxZoom) {
+            throw IllegalArgumentException("out of bounds zoom")
         }
-        return "0" // default Camera. Logical Camera is not supported
-    }
+        this.zoomValue = zoomValue
 
-    private fun startBackgroundHandler() {
-        if (backgroundThread != null) return
-
-        backgroundThread = HandlerThread("Camera-$cameraId").also {
-            it.start()
-            backgroundHandler = Handler(it.looper)
-        }
-    }
-
-    private fun stopBackgroundHandler() {
-        backgroundThread?.quitSafely()
         try {
-            // TODO: investigate why thread does not end when join is called
-            // backgroundThread?.join()
-            backgroundThread = null
-            backgroundHandler = null
-        } catch (e: InterruptedException) {
-            Log.e(TAG, "===== stop background error $e")
-        }
-    }
-
-    private fun startPreview() {
-        try {
-            if (!openLock.tryAcquire(1L, TimeUnit.SECONDS)) return
-            if (isClosed) return
-            state = State.PREVIEW
-            val builder = createPreviewRequestBuilder()
-            captureSession?.setRepeatingRequest(
-                builder?.build(), captureCallback, backgroundHandler
-            )
-
-        } catch (e1: IllegalStateException) {
-
-        } catch (e2: CameraAccessException) {
-
-        } catch (e3: InterruptedException) {
-
-        } finally {
-            openLock.release()
-        }
-    }
-
-    @Throws(CameraAccessException::class)
-    private fun createPreviewRequestBuilder(): CaptureRequest.Builder? {
-        val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-        builder?.addTarget(surface)
-        enableDefaultModes(builder)
-        return builder
-    }
-
-    private fun enableDefaultModes(builder: CaptureRequest.Builder?) {
-        if (builder == null) return
-
-        // Auto focus should be continuous for camera preview.
-        // Use the same AE and AF modes as the preview.
-        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-        if (characteristics.isContinuousAutoFocusSupported()) {
-            builder.set(
-                CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-            )
-        } else {
-            builder.set(
-                CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_AUTO
-            )
-        }
-
-        if (characteristics.isAutoExposureSupported(aeMode)) {
-            builder.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
-        } else {
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-        }
-
-        when (wbMode) {
-            WBMode.AUTO -> {
-                if (characteristics.isAutoWhiteBalanceSupported()) {
-                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                }
-            }
-            WBMode.SUNNY -> {
-                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
-            }
-            WBMode.INCANDECENT -> {
-                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT)
-            }
-        }
-
-        builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
-    }
-
-    /**
-     * Lock the focus as the first step for a still image capture.
-     */
-    private fun lockFocus() {
-        try {
-            state = State.WAITING_LOCK
-
-            val builder = createPreviewRequestBuilder()
-
-            if (!characteristics.isContinuousAutoFocusSupported()) {
-                // If continuous AF is not supported , start AF here
-                builder?.set(
-                    CaptureRequest.CONTROL_AF_TRIGGER,
-                    CaptureRequest.CONTROL_AF_TRIGGER_START
-                )
-            }
-            captureSession?.capture(builder?.build(), captureCallback, backgroundHandler)
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "lockFocus $e")
-        }
-    }
-
-    private fun runPreCapture() {
-        try {
-            state = State.WAITING_PRECAPTURE
-            val builder = createPreviewRequestBuilder()
-            builder?.set(
-                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
-                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START
-            )
-            captureSession?.capture(builder?.build(), captureCallback, backgroundHandler)
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "runPreCapture $e")
-        }
-    }
-
-    /**
-     * Capture a still picture. This method should be called when we get a response in
-     * [.captureCallback] from both [.lockFocus].
-     */
-    private fun captureStillPicture() {
-        state = State.TAKEN
-        try {
-            // This is the CaptureRequest.Builder that we use to take a picture.
-            val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-            enableDefaultModes(builder)
-            builder?.addTarget(imageReader?.surface)
-            builder?.addTarget(surface)
             captureSession?.stopRepeating()
-            captureSession?.capture(
-                builder?.build(),
-                object : CameraCaptureSession.CaptureCallback() {
-                    override fun onCaptureCompleted(
-                        session: CameraCaptureSession,
-                        request: CaptureRequest,
-                        result: TotalCaptureResult
-                    ) {
-                        // Once still picture is captured, ImageReader.OnImageAvailable gets called
-                        // You can do completion task here
-                    }
-                },
-                backgroundHandler
-            )
-
+            setCropRegion(requestBuilder, zoomValue)
+            requestBuilder?.build()?.let {
+                captureSession?.setRepeatingRequest(it, captureCallback, backgroundHandler)
+            }
         } catch (e: CameraAccessException) {
-            Log.e(TAG, "captureStillPicture $e")
+            Log.w(TAG, e)
         }
-    }
 
+    }
 
     /**
      * Focus manually
@@ -591,46 +430,192 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
     fun getPreviewSize(aspectRatio: Float) = characteristics.getPreviewSize(aspectRatio)
 
+    // internal methods
+
     /**
-     * Get sensor orientation.
-     * 0, 90, 180, 270.
+     * Set up camera Id from id list
      */
-    fun getSensorOrientation() = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-
-    fun getFlashSupported() = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-
-    fun chooseOptimalSize(
-        textureViewWidth: Int,
-        textureViewHeight: Int,
-        maxWidth: Int,
-        maxHeight: Int,
-        aspectRatio: Size
-    ): Size =
-        characteristics.chooseOptimalSize(
-            textureViewWidth,
-            textureViewHeight,
-            maxWidth,
-            maxHeight,
-            aspectRatio
-        )
-
-    fun areDimensionsSwapped(sensorOrientation: Int, displayRotation: Int): Boolean {
-        var swappedDimensions = false
-        when (displayRotation) {
-            Surface.ROTATION_0, Surface.ROTATION_180 -> {
-                if (sensorOrientation == 90 || sensorOrientation == 270) {
-                    swappedDimensions = true
-                }
-            }
-            Surface.ROTATION_90, Surface.ROTATION_270 -> {
-                if (sensorOrientation == 0 || sensorOrientation == 180) {
-                    swappedDimensions = true
-                }
-            }
-            else -> {
-                Log.e(TAG, "Display rotation is invalid: $displayRotation")
+    private fun setUpCameraId(manager: CameraManager): String {
+        for (cameraId in manager.cameraIdList) {
+            val characteristics = manager.getCameraCharacteristics(cameraId)
+            // Usually cameraId = 0 is logical camera, so we check that
+            val capabilities = characteristics.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+            )
+            val isLogicalCamera = capabilities.contains(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+            )
+            if (isLogicalCamera) {
+                this.physicalCameraIds = characteristics.physicalCameraIds
+                return cameraId
             }
         }
-        return swappedDimensions
+        return "0" // default Camera. Logical Camera is not supported
     }
+
+    private fun startBackgroundHandler() {
+        if (backgroundThread != null) return
+
+        backgroundThread = HandlerThread("Camera-$cameraId").also {
+            it.start()
+            backgroundHandler = Handler(it.looper)
+        }
+    }
+
+    private fun stopBackgroundHandler() {
+        backgroundThread?.quitSafely()
+        try {
+            // TODO: investigate why thread does not end when join is called
+            // backgroundThread?.join()
+            backgroundThread = null
+            backgroundHandler = null
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "===== stop background error $e")
+        }
+    }
+
+    private fun startPreview() {
+        try {
+            if (!openLock.tryAcquire(1L, TimeUnit.SECONDS)) return
+            if (isClosed) return
+            state = State.PREVIEW
+            requestBuilder = createPreviewRequestBuilder()
+            requestBuilder?.addTarget(surface)
+            requestBuilder?.build()?.let {
+                captureSession?.setRepeatingRequest(it, captureCallback, backgroundHandler)
+            }
+        } catch (e1: IllegalStateException) {
+
+        } catch (e2: CameraAccessException) {
+
+        } catch (e3: InterruptedException) {
+
+        } finally {
+            openLock.release()
+        }
+    }
+
+    @Throws(CameraAccessException::class)
+    private fun createPreviewRequestBuilder(): CaptureRequest.Builder? {
+        val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+        enableDefaultModes(builder)
+        setCropRegion(builder, zoomValue);
+        return builder
+    }
+
+    private fun enableDefaultModes(builder: CaptureRequest.Builder?) {
+        builder?.apply {
+            // Auto focus should be continuous for camera preview.
+            // Use the same AE and AF modes as the preview.
+            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+
+            if (characteristics.isContinuousAutoFocusSupported()) {
+                set(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                )
+            } else {
+                set(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_AUTO
+                )
+            }
+
+            if (characteristics.isAutoExposureSupported(aeMode)) {
+                set(CaptureRequest.CONTROL_AE_MODE, aeMode)
+            } else {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            }
+
+            set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
+        }
+    }
+
+    /**
+     * Lock the focus as the first step for a still image capture.
+     */
+    private fun lockFocus() {
+        try {
+            state = State.WAITING_LOCK
+
+            if (!characteristics.isContinuousAutoFocusSupported()) {
+                // If continuous AF is not supported , start AF here
+                requestBuilder?.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CaptureRequest.CONTROL_AF_TRIGGER_START
+                )
+            }
+            requestBuilder?.build()?.let {
+                captureSession?.capture(it, captureCallback, backgroundHandler)
+            }
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "lockFocus $e")
+        }
+    }
+
+    private fun runPreCapture() {
+        try {
+            state = State.WAITING_PRECAPTURE
+            requestBuilder?.set(
+                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START
+            )
+            requestBuilder?.build()?.let {
+                captureSession?.capture(it, captureCallback, backgroundHandler)
+            }
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "runPreCapture $e")
+        }
+    }
+
+    /**
+     * Capture a still picture. This method should be called when we get a response in
+     * [.captureCallback] from both [.lockFocus].
+     */
+    private fun captureStillPicture() {
+        state = State.TAKEN
+        try {
+            // This is the CaptureRequest.Builder that we use to take a picture.
+            val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            enableDefaultModes(builder)
+            builder?.addTarget(imageReader?.surface)
+            builder?.addTarget(surface)
+            captureSession?.stopRepeating()
+            captureSession?.capture(
+                builder?.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        // Once still picture is captured, ImageReader.OnImageAvailable gets called
+                        // You can do completion task here
+                    }
+                },
+                backgroundHandler
+            )
+
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "captureStillPicture $e")
+        }
+    }
+
+
+    private fun setCropRegion(builder: CaptureRequest.Builder?, zoom: Double) {
+        builder?.let {
+            Log.d(TAG, "setCropRegion(x$zoom)")
+            val width = Math.floor(activeArraySize.width() / zoom).toInt()
+            val left = (activeArraySize.width() - width) / 2
+            val height = Math.floor(activeArraySize.height() / zoom).toInt()
+            val top = (activeArraySize.height() - height) / 2
+            Log.d(TAG, "crop region(left=$left, top=$top, right=${left + width}, bottom=${top + height}) zoom($zoom)")
+
+            it.set(
+                CaptureRequest.SCALER_CROP_REGION,
+                Rect(left, top, left + width, top + height)
+            )
+        }
+    }
+
 }
