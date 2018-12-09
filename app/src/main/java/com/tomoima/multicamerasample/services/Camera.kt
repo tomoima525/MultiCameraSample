@@ -2,28 +2,23 @@ package com.tomoima.multicamerasample.services
 
 import android.graphics.ImageFormat
 import android.graphics.Rect
-import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
 import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.support.v4.math.MathUtils.clamp
 import android.util.Log
 import android.util.Size
 import android.util.SparseIntArray
 import android.view.OrientationEventListener
 import android.view.Surface
 import com.tomoima.multicamerasample.extensions.*
-import java.util.*
+import com.tomoima.multicamerasample.models.CameraIdInfo
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import android.hardware.camera2.CameraMetadata
-import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.params.MeteringRectangle
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
-import android.support.v4.math.MathUtils.clamp
 
 
 private const val TAG = "CAMERA"
@@ -44,14 +39,14 @@ val ORIENTATIONS = SparseIntArray().apply {
 }
 
 enum class WBMode {
-  AUTO, SUNNY, INCANDECENT
+    AUTO, SUNNY, INCANDECENT
 }
 
 private const val MAX_PREVIEW_WIDTH = 1920
 private const val MAX_PREVIEW_HEIGHT = 1080
 
 interface ImageHandler {
-    fun handleImage(image: Image) :Runnable
+    fun handleImage(image: Image): Runnable
 }
 
 interface OnFocusListener {
@@ -72,7 +67,8 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
     companion object {
         // Make thread-safe Singleton
-        @Volatile var instance: Camera? = null
+        @Volatile
+        var instance: Camera? = null
             private set
 
         fun initInstance(cameraManager: CameraManager): Camera {
@@ -94,6 +90,8 @@ class Camera constructor(private val cameraManager: CameraManager) {
      * An id for camera device
      */
     private val cameraId: String
+
+    private lateinit var physicalCameraIds: Set<String>
 
     /**
      * A [Semaphore] to prevent the app from exiting before closing the camera.
@@ -173,7 +171,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
         override fun onConfigured(session: CameraCaptureSession) {
             // if camera is closed
-            if(isClosed) return
+            if (isClosed) return
             captureSession = session
             startPreview()
         }
@@ -199,7 +197,8 @@ class Camera constructor(private val cameraManager: CameraManager) {
                         runPreCapture()
                     } else if (CaptureResult.CONTROL_AF_STATE_INACTIVE == afState ||
                         CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED == afState ||
-                        CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED == afState) {
+                        CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED == afState
+                    ) {
                         // CONTROL_AE_STATE can be null on some devices
                         val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
                         if (aeState == null || aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED) {
@@ -217,7 +216,8 @@ class Camera constructor(private val cameraManager: CameraManager) {
                     if (aeState == null
                         || aeState == CaptureRequest.CONTROL_AE_STATE_PRECAPTURE
                         || aeState == CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED
-                        || aeState == CaptureRequest.CONTROL_AE_STATE_CONVERGED) {
+                        || aeState == CaptureRequest.CONTROL_AE_STATE_CONVERGED
+                    ) {
                         state = State.WAITING_NON_PRECAPTURE
                     }
                 }
@@ -228,19 +228,24 @@ class Camera constructor(private val cameraManager: CameraManager) {
                         captureStillPicture()
                     }
                 }
-                else -> { }
+                else -> {
+                }
             }
         }
 
-        override fun onCaptureProgressed(session: CameraCaptureSession,
-                                         request: CaptureRequest,
-                                         partialResult: CaptureResult) {
+        override fun onCaptureProgressed(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            partialResult: CaptureResult
+        ) {
             process(partialResult)
         }
 
-        override fun onCaptureCompleted(session: CameraCaptureSession,
-                                        request: CaptureRequest,
-                                        result: TotalCaptureResult) {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult
+        ) {
             process(result)
         }
 
@@ -253,11 +258,11 @@ class Camera constructor(private val cameraManager: CameraManager) {
     fun open() {
 
         try {
-            if(!openLock.tryAcquire(3L, TimeUnit.SECONDS)) {
+            if (!openLock.tryAcquire(3L, TimeUnit.SECONDS)) {
                 throw IllegalStateException("Camera launch failed")
             }
 
-            if(cameraDevice != null) {
+            if (cameraDevice != null) {
                 openLock.release()
                 return
             }
@@ -265,7 +270,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
             startBackgroundHandler()
 
             cameraManager.openCamera(cameraId, cameraStateCallback, backgroundHandler)
-        } catch (e : SecurityException) {
+        } catch (e: SecurityException) {
 
         }
     }
@@ -286,13 +291,13 @@ class Camera constructor(private val cameraManager: CameraManager) {
         )
     }
 
-    fun takePicture(handler : ImageHandler) {
+    fun takePicture(handler: ImageHandler) {
         if (cameraDevice == null) {
             throw IllegalStateException("Camera device not ready")
         }
 
-        if(isClosed) return
-        imageReader?.setOnImageAvailableListener(object: ImageReader.OnImageAvailableListener{
+        if (isClosed) return
+        imageReader?.setOnImageAvailableListener(object : ImageReader.OnImageAvailableListener {
             override fun onImageAvailable(reader: ImageReader) {
                 val image = reader.acquireNextImage()
                 backgroundHandler?.post(handler.handleImage(image = image))
@@ -304,7 +309,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
     fun close() {
         try {
-            if(openLock.tryAcquire(3, TimeUnit.SECONDS))
+            if (openLock.tryAcquire(3, TimeUnit.SECONDS))
                 isClosed = true
             captureSession?.close()
             captureSession = null
@@ -325,6 +330,8 @@ class Camera constructor(private val cameraManager: CameraManager) {
         }
     }
 
+    fun getCamerIds(): CameraIdInfo = CameraIdInfo(cameraId, physicalCameraIds.toList())
+
     // internal methods
 
     /**
@@ -333,16 +340,19 @@ class Camera constructor(private val cameraManager: CameraManager) {
     private fun setUpCameraId(manager: CameraManager): String {
         for (cameraId in manager.cameraIdList) {
             val characteristics = manager.getCameraCharacteristics(cameraId)
-
-            // We don't use a front facing camera in this sample.
-            val cameraDirection = characteristics.get(CameraCharacteristics.LENS_FACING)
-            if (cameraDirection != null &&
-                cameraDirection == CameraCharacteristics.LENS_FACING_FRONT) {
-                continue
+            // Usually cameraId = 0 is logical camera, so we check that
+            val capabilities = characteristics.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+            )
+            val isLogicalCamera = capabilities.contains(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+            )
+            if (isLogicalCamera) {
+                this.physicalCameraIds = characteristics.physicalCameraIds
+                return cameraId
             }
-            return cameraId
         }
-        throw IllegalStateException("Could not set Camera Id")
+        return "0" // default Camera. Logical Camera is not supported
     }
 
     private fun startBackgroundHandler() {
@@ -368,12 +378,13 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
     private fun startPreview() {
         try {
-            if(!openLock.tryAcquire(1L, TimeUnit.SECONDS)) return
-            if(isClosed) return
+            if (!openLock.tryAcquire(1L, TimeUnit.SECONDS)) return
+            if (isClosed) return
             state = State.PREVIEW
             val builder = createPreviewRequestBuilder()
             captureSession?.setRepeatingRequest(
-                builder?.build(), captureCallback, backgroundHandler)
+                builder?.build(), captureCallback, backgroundHandler
+            )
 
         } catch (e1: IllegalStateException) {
 
@@ -395,7 +406,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
     }
 
     private fun enableDefaultModes(builder: CaptureRequest.Builder?) {
-        if(builder == null) return
+        if (builder == null) return
 
         // Auto focus should be continuous for camera preview.
         // Use the same AE and AF modes as the preview.
@@ -403,7 +414,8 @@ class Camera constructor(private val cameraManager: CameraManager) {
         if (characteristics.isContinuousAutoFocusSupported()) {
             builder.set(
                 CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
         } else {
             builder.set(
                 CaptureRequest.CONTROL_AF_MODE,
@@ -417,11 +429,11 @@ class Camera constructor(private val cameraManager: CameraManager) {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         }
 
-        when(wbMode) {
+        when (wbMode) {
             WBMode.AUTO -> {
-              if (characteristics.isAutoWhiteBalanceSupported()) {
-                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-              }
+                if (characteristics.isAutoWhiteBalanceSupported()) {
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                }
             }
             WBMode.SUNNY -> {
                 builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
@@ -443,7 +455,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
             val builder = createPreviewRequestBuilder()
 
-            if(!characteristics.isContinuousAutoFocusSupported()) {
+            if (!characteristics.isContinuousAutoFocusSupported()) {
                 // If continuous AF is not supported , start AF here
                 builder?.set(
                     CaptureRequest.CONTROL_AF_TRIGGER,
@@ -486,14 +498,17 @@ class Camera constructor(private val cameraManager: CameraManager) {
             captureSession?.capture(
                 builder?.build(),
                 object : CameraCaptureSession.CaptureCallback() {
-                    override fun onCaptureCompleted(session: CameraCaptureSession,
-                                                    request: CaptureRequest,
-                                                    result: TotalCaptureResult) {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
                         // Once still picture is captured, ImageReader.OnImageAvailable gets called
                         // You can do completion task here
                     }
                 },
-                backgroundHandler)
+                backgroundHandler
+            )
 
         } catch (e: CameraAccessException) {
             Log.e(TAG, "captureStillPicture $e")
@@ -501,58 +516,61 @@ class Camera constructor(private val cameraManager: CameraManager) {
     }
 
 
-  /**
-   * Focus manually
-   * @param x touch X coordinate
-   * @param y touch Y coordinate
-   * @param width screen width
-   * @param height screen height
-   */
-  fun manualFocus(x: Float, y: Float, width: Int, height: Int) {
-    // captureSession can be null with Monkey tap
-    if (captureSession == null || cameraDevice == null) {
-      return
+    /**
+     * Focus manually
+     * @param x touch X coordinate
+     * @param y touch Y coordinate
+     * @param width screen width
+     * @param height screen height
+     */
+    fun manualFocus(x: Float, y: Float, width: Int, height: Int) {
+        // captureSession can be null with Monkey tap
+        if (captureSession == null || cameraDevice == null) {
+            return
+        }
+        try {
+            val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW) ?: return
+            builder.addTarget(surface)
+
+            val rect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            val areaSize = 200
+
+            if (rect == null) {
+                return
+            }
+
+            val right = rect.right
+            val bottom = rect.bottom
+            val centerX = x.toInt()
+            val centerY = y.toInt()
+            // Adjust the point of focus in the screen
+            val ll = (centerX * right - areaSize) / width
+            val rr = (centerY * bottom - areaSize) / height
+
+            val focusLeft = clamp(ll, 0, right)
+            val focusBottom = clamp(rr, 0, bottom)
+            val newRect = Rect(focusLeft, focusBottom, focusLeft + areaSize, focusBottom + areaSize)
+            // Adjust focus area with metering weight
+            val meteringRectangle = MeteringRectangle(newRect, 500)
+            builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRectangle))
+            builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRectangle))
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+
+            // Request should be repeated to maintain preview focus
+            captureSession?.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
+
+            // Trigger Focus
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            builder.set(
+                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START
+            )
+            captureSession?.capture(builder.build(), captureCallback, backgroundHandler)
+        } catch (e: IllegalStateException) {
+        } catch (e: CameraAccessException) {
+        }
     }
-    try {
-      val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW) ?: return
-      builder.addTarget(surface)
 
-      val rect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-      val areaSize = 200
-
-      if (rect == null) {
-        return
-      }
-
-      val right = rect.right
-      val bottom = rect.bottom
-      val centerX = x.toInt()
-      val centerY = y.toInt()
-      // Adjust the point of focus in the screen
-      val ll = (centerX * right - areaSize) / width
-      val rr = (centerY * bottom - areaSize) / height
-
-      val focusLeft = clamp(ll, 0, right)
-      val focusBottom = clamp(rr, 0, bottom)
-      val newRect = Rect(focusLeft, focusBottom, focusLeft + areaSize, focusBottom + areaSize)
-      // Adjust focus area with metering weight
-      val meteringRectangle = MeteringRectangle(newRect, 500)
-      builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRectangle))
-      builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRectangle))
-      builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-
-      // Request should be repeated to maintain preview focus
-      captureSession?.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
-
-      // Trigger Focus
-      builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
-      builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
-              CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
-      captureSession?.capture(builder.build(), captureCallback, backgroundHandler)
-    } catch (e: IllegalStateException) {
-    } catch (e: CameraAccessException) {
-    }
-  }
     /**
      * Retrieves the image orientation from the specified screen rotation.
      * Used to calculate bitmap image rotation
@@ -581,18 +599,20 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
     fun getFlashSupported() = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
 
-    fun chooseOptimalSize(textureViewWidth: Int,
-                          textureViewHeight: Int,
-                          maxWidth: Int,
-                          maxHeight: Int,
-                          aspectRatio: Size): Size =
-            characteristics.chooseOptimalSize(
-                    textureViewWidth,
-                    textureViewHeight,
-                    maxWidth,
-                    maxHeight,
-                    aspectRatio
-            )
+    fun chooseOptimalSize(
+        textureViewWidth: Int,
+        textureViewHeight: Int,
+        maxWidth: Int,
+        maxHeight: Int,
+        aspectRatio: Size
+    ): Size =
+        characteristics.chooseOptimalSize(
+            textureViewWidth,
+            textureViewHeight,
+            maxWidth,
+            maxHeight,
+            aspectRatio
+        )
 
     fun areDimensionsSwapped(sensorOrientation: Int, displayRotation: Int): Boolean {
         var swappedDimensions = false
