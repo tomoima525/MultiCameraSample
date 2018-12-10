@@ -7,6 +7,8 @@ import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM
 import android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
@@ -21,8 +23,7 @@ import com.tomoima.multicamerasample.extensions.getPreviewSize
 import com.tomoima.multicamerasample.extensions.isAutoExposureSupported
 import com.tomoima.multicamerasample.extensions.isContinuousAutoFocusSupported
 import com.tomoima.multicamerasample.models.CameraIdInfo
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.*
 
 private const val TAG = "CAMERA"
 
@@ -128,7 +129,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
      * An additional thread for running tasks that shouldn't block the UI.
      */
     private var backgroundThread: HandlerThread? = null
-    private var surface: Surface? = null
+    private var surfaces: List<Surface>? = null
     private var isClosed = true
     var deviceRotation: Int = 0 // Device rotation is defined by Screen Rotation
 
@@ -137,6 +138,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
         characteristics = cameraManager.getCameraCharacteristics(cameraId)
         activeArraySize = characteristics.get(SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect()
         maxZoom = characteristics.get(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)?.toDouble() ?: ZOOM_SCALE
+        calculateZoomSize(manager = cameraManager)
         Log.d(TAG, "CameraID($cameraId) -> maxZoom $maxZoom")
     }
 
@@ -281,17 +283,13 @@ class Camera constructor(private val cameraManager: CameraManager) {
     /**
      * Start camera. Should be called after open() is successful
      */
-    fun start(surface: Surface) {
-        this.surface = surface
-
-        // setup camera session
-        val size = characteristics.getCaptureSize(CompareSizesByArea())
-        imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 1)
-        cameraDevice?.createCaptureSession(
-            listOf(surface, imageReader?.surface),
-            captureStateCallback,
-            backgroundHandler
-        )
+    fun start(surfaces: List<Surface>) {
+        this.surfaces = surfaces
+        if(surfaces.size > 1) {
+            startDualCamera(surfaces)
+        } else {
+            startSingleCamera(surfaces[0])
+        }
     }
 
     fun takePicture(handler: ImageHandler) {
@@ -318,8 +316,10 @@ class Camera constructor(private val cameraManager: CameraManager) {
             cameraDevice?.close()
             cameraDevice = null
 
-            surface?.release()
-            surface = null
+            surfaces?.forEach {
+                it.release()
+            }
+            surfaces = null
 
             imageReader?.close()
             imageReader = null
@@ -369,7 +369,9 @@ class Camera constructor(private val cameraManager: CameraManager) {
         }
         try {
             val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW) ?: return
-            builder.addTarget(surface)
+
+            // TODO: set current Surface by aquiring current cameraID that's been used
+            //builder.addTarget(surface)
 
             val rect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             val areaSize = 200
@@ -432,6 +434,35 @@ class Camera constructor(private val cameraManager: CameraManager) {
 
     // internal methods
 
+    private fun startSingleCamera(surface: Surface) {
+        // setup camera session
+        val size = characteristics.getCaptureSize(CompareSizesByArea())
+        imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 1)
+        cameraDevice?.createCaptureSession(
+            listOf(surface, imageReader?.surface),
+            captureStateCallback,
+            backgroundHandler
+        )
+    }
+
+    private fun startDualCamera(surfaces: List<Surface>) {
+        val outputConfigs =  surfaces.mapIndexed { index, surface ->
+            val physicalCameraId = physicalCameraIds.toList()[index]
+            val config = OutputConfiguration(surface)
+            config.setPhysicalCameraId(physicalCameraId)
+            config
+        }
+
+        val executor = Executors.newCachedThreadPool()
+        val sessionConfig = SessionConfiguration(
+            SessionConfiguration.SESSION_REGULAR,
+            outputConfigs,
+            executor,
+            captureStateCallback
+        )
+        cameraDevice?.createCaptureSession(sessionConfig)
+    }
+
     /**
      * Set up camera Id from id list
      */
@@ -451,6 +482,13 @@ class Camera constructor(private val cameraManager: CameraManager) {
             }
         }
         return "0" // default Camera. Logical Camera is not supported
+    }
+
+    private fun calculateZoomSize(manager: CameraManager) {
+        physicalCameraIds.forEach {
+            val characteristics = manager.getCameraCharacteristics(it)
+            Log.d(TAG, "==== zoom $it ${characteristics.get(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)?.toDouble()}")
+        }
     }
 
     private fun startBackgroundHandler() {
@@ -480,7 +518,9 @@ class Camera constructor(private val cameraManager: CameraManager) {
             if (isClosed) return
             state = State.PREVIEW
             requestBuilder = createPreviewRequestBuilder()
-            requestBuilder?.addTarget(surface)
+            surfaces?.forEach {
+                requestBuilder?.addTarget(it)
+            }
             requestBuilder?.build()?.let {
                 captureSession?.setRepeatingRequest(it, captureCallback, backgroundHandler)
             }
@@ -579,7 +619,9 @@ class Camera constructor(private val cameraManager: CameraManager) {
             val builder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             enableDefaultModes(builder)
             builder?.addTarget(imageReader?.surface)
-            builder?.addTarget(surface)
+            surfaces?.forEach {
+                builder?.addTarget(it)
+            }
             captureSession?.stopRepeating()
             captureSession?.capture(
                 builder?.build(),

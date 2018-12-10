@@ -15,11 +15,17 @@ import android.util.Log
 import android.util.Size
 import android.view.*
 import android.widget.SeekBar
+import com.tomoima.multicamerasample.listeners.SurfaceTextureWaiter
 import kotlinx.android.synthetic.main.fragment_camera.*
 import com.tomoima.multicamerasample.models.CameraIdInfo
+import com.tomoima.multicamerasample.models.State
 import com.tomoima.multicamerasample.services.Camera
 import com.tomoima.multicamerasample.ui.ConfirmationDialog
 import com.tomoima.multicamerasample.ui.ErrorDialog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 class CameraFragment : Fragment() {
@@ -29,22 +35,6 @@ class CameraFragment : Fragment() {
         private const val REQUEST_CAMERA_PERMISSION = 100
         private val TAG = CameraFragment.javaClass::getSimpleName.toString()
         fun newInstance() = CameraFragment()
-    }
-
-    private val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-
-        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-            openCamera(width, height)
-        }
-
-        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
-            configureTransform(width, height)
-        }
-
-        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture) = true
-
-        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
-
     }
 
     private var camera: Camera? = null
@@ -93,10 +83,34 @@ class CameraFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        if (camera1View.isAvailable) {
+        if (camera1View.isAvailable && camera2View.isAvailable) {
             openCamera(camera1View.width, camera1View.height)
         } else {
-            camera1View.surfaceTextureListener = surfaceTextureListener
+            val waiter1 = SurfaceTextureWaiter(camera1View)
+            val waiter2 = SurfaceTextureWaiter(camera2View)
+
+            GlobalScope.launch {
+                val result1 = waiter1.textureIsReady()
+                val result2 = waiter2.textureIsReady()
+                Log.d(TAG," ======== ready $result1 $result2" )
+                // Assuming both textures are ready and they have the same width and height,
+                // Just check the state of 1
+                when(result1.state) {
+                    State.ON_TEXTURE_AVAILABLE -> {
+                        withContext(Dispatchers.Main) {
+                            openDualCamera(width = result1.width, height = result1.height)
+                        }
+                    }
+                    State.ON_TEXTURE_SIZE_CHANGED -> {
+                        withContext(Dispatchers.Main) {
+                            configureTransform(viewWidth = result1.width, viewHeight = result2.height)
+                        }
+                    }
+                    else -> { }
+                }
+            }
+            //camera1View.surfaceTextureListener = surfaceTextureListener
+            //camera2View.surfaceTextureListener = surfaceTextureListener
         }
     }
 
@@ -154,9 +168,49 @@ class CameraFragment : Fragment() {
                 camera1View.setAspectRatio(previewSize.height, previewSize.width)
                 configureTransform(width, height)
                 it.open()
-                val texture = camera1View.surfaceTexture
-                texture.setDefaultBufferSize(previewSize.width, previewSize.height)
-                it.start(Surface(texture))
+                val texture1 = camera1View.surfaceTexture
+                texture1.setDefaultBufferSize(previewSize.width, previewSize.height)
+                it.start(listOf(Surface(texture1)))
+                updateCameraStatus(it.getCameraIds())
+            }
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, e.toString())
+        } catch (e: InterruptedException) {
+            throw RuntimeException("Interrupted while trying to lock camera opening.", e)
+        }
+    }
+
+    private fun openDualCamera(width: Int, height: Int) {
+        if (activity == null) {
+            Log.e(TAG, "activity is not ready!")
+            return
+        }
+        val permission = ContextCompat.checkSelfPermission(activity!!, Manifest.permission.CAMERA)
+        if (permission != PackageManager.PERMISSION_GRANTED) {
+            requestCameraPermission()
+            return
+        }
+
+        try {
+            camera?.let {
+                // Usually preview size has to be calculated based on the sensor rotation using getImageOrientation()
+                // so that the sensor rotation and image rotation aspect matches correctly.
+                // In this sample app, we know that Pixel series has the 90 degrees of sensor rotation,
+                // so we just consider that width/ height < 1, which means portrait.
+                val aspectRatio: Float = width / height.toFloat()
+                previewSize = it.getPreviewSize(aspectRatio)
+                // FIXME should write this better
+                camera1View.setAspectRatio(previewSize.height, previewSize.width)
+                camera2View.setAspectRatio(previewSize.height, previewSize.width)
+                val matrix = calculateTransform(width, height)
+                camera1View.setTransform(matrix)
+                camera2View.setTransform(matrix)
+                it.open()
+                val texture1 = camera1View.surfaceTexture
+                val texture2 = camera2View.surfaceTexture
+                texture1.setDefaultBufferSize(previewSize.width, previewSize.height)
+                texture2.setDefaultBufferSize(previewSize.width, previewSize.height)
+                it.start(listOf(Surface(texture1), Surface(texture2)))
                 updateCameraStatus(it.getCameraIds())
             }
         } catch (e: CameraAccessException) {
@@ -178,6 +232,30 @@ class CameraFragment : Fragment() {
                 .map { s -> "[$s]" }
                 .reduce { acc, s -> "$acc,$s" }
         }
+    }
+
+    private fun calculateTransform(viewWidth: Int, viewHeight: Int) : Matrix {
+        val rotation = activity!!.windowManager.defaultDisplay.rotation
+        val matrix = Matrix()
+        val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
+        val bufferRect = RectF(0f, 0f, previewSize.height.toFloat(), previewSize.width.toFloat())
+        val centerX = viewRect.centerX()
+        val centerY = viewRect.centerY()
+        if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            val scale = Math.max(
+                viewHeight.toFloat() / previewSize.height,
+                viewWidth.toFloat() / previewSize.width
+            )
+            with(matrix) {
+                setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+                postScale(scale, scale, centerX, centerY)
+                postRotate((90 * (rotation - 2)).toFloat(), centerX, centerY)
+            }
+        } else if (Surface.ROTATION_180 == rotation) {
+            matrix.postRotate(180f, centerX, centerY)
+        }
+        return matrix
     }
 
     private fun configureTransform(viewWidth: Int, viewHeight: Int) {
