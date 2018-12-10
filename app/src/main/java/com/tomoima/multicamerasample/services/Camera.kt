@@ -139,6 +139,7 @@ class Camera constructor(private val cameraManager: CameraManager) {
         activeArraySize = characteristics.get(SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect()
         maxZoom = characteristics.get(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)?.toDouble() ?: ZOOM_SCALE
         calculateZoomSize(manager = cameraManager)
+        calculateActiveArraySize(manager = cameraManager)
         Log.d(TAG, "CameraID($cameraId) -> maxZoom $maxZoom")
     }
 
@@ -488,6 +489,14 @@ class Camera constructor(private val cameraManager: CameraManager) {
         physicalCameraIds.forEach {
             val characteristics = manager.getCameraCharacteristics(it)
             Log.d(TAG, "==== zoom $it ${characteristics.get(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)?.toDouble()}")
+        }
+    }
+
+    private fun calculateActiveArraySize(manager: CameraManager) {
+        physicalCameraIds.forEach {
+            val characteristics = manager.getCameraCharacteristics(it)
+            val activeArraySize = characteristics.get(SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect()
+            Log.d(TAG, "==== width ${activeArraySize.width()} height ${activeArraySize.height()} $it")
         }
     }
 

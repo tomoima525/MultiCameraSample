@@ -9,6 +9,7 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraManager
 import android.os.Bundle
+import android.os.Handler
 import android.support.v4.app.Fragment
 import android.support.v4.content.ContextCompat
 import android.util.Log
@@ -41,11 +42,17 @@ class CameraFragment : Fragment() {
 
     private lateinit var previewSize: Size
 
+    private val zoomTransition = true
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
-    ): View? = inflater.inflate(R.layout.fragment_camera, container, false)
+    ): View? = if(zoomTransition) {
+        inflater.inflate(R.layout.fragment_camera_2, container, false)
+    } else {
+        inflater.inflate(R.layout.fragment_camera, container, false)
+    }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -55,8 +62,34 @@ class CameraFragment : Fragment() {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
                 this.progressValue = progress
                 camera?.maxZoom?.let {
+                    if(!camera1View.isAvailable || !camera2View.isAvailable ) return@let
                     val zoomValue = progressValue.toDouble()/seekBar.max * it
-                    camera?.setZoom(zoomValue)
+                    if(zoomTransition) {
+                        // ADHOC
+                        // Because max zoom is 7 and zoom level difference of two cameras are 2,
+                        // Switch Camera 1 and 2 when zoom value is 100 / 7 * 2 = 2.857
+                        if (zoomValue < 2.857) {
+                            camera?.setZoom(zoomValue + 1)
+                            // Delay view switch to ease the transition
+                            Handler().postDelayed(
+                                {
+                                    camera1ViewLayout.visibility = View.INVISIBLE
+                                    camera2ViewLayout.visibility = View.VISIBLE
+                                }
+                                , 200)
+
+                        } else {
+                            camera?.setZoom(zoomValue)
+                            Handler().postDelayed(
+                                {
+                                    camera1ViewLayout.visibility = View.VISIBLE
+                                    camera2ViewLayout.visibility = View.INVISIBLE
+                                }
+                                , 200)
+                        }
+                    } else {
+                        camera?.setZoom(zoomValue)
+                    }
                 }
             }
 

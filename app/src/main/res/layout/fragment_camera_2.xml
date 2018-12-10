@@ -27,7 +27,7 @@
             android:textColor="@android:color/white"
             android:layout_alignBottom="@+id/camera1View"
             android:textAlignment="center"
-            android:text="CAMERA 1"/>
+            android:text="CAMERA 2"/>
     </RelativeLayout>
 
     <TextView
@@ -121,7 +121,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toEndOf="@+id/camera1ViewLayout"
+        app:layout_constraintStart_toStartOf="parent"
         >
         <com.tomoima.multicamerasample.ui.AutoFitTextureView
             android:id="@+id/camera2View"
@@ -137,7 +137,7 @@
             android:textColor="@android:color/white"
             android:layout_alignBottom="@+id/camera2View"
             android:textAlignment="center"
-            android:text="CAMERA 2"/>
+            android:text="CAMERA 3"/>
     </RelativeLayout>
 
 
