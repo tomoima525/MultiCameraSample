@@ -101,4 +101,13 @@
         android:text="Zoom"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/textView5" />
+
+    <com.tomoima.multicamerasample.ui.AutoFitTextureView
+        android:id="@+id/camera2View"
+        android:layout_width="160dp"
+        android:layout_height="320dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        app:layout_constraintStart_toEndOf="@+id/camera1View"
+        app:layout_constraintTop_toTopOf="parent" />
 </android.support.constraint.ConstraintLayout>
