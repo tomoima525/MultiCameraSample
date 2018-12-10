@@ -12,7 +12,7 @@ private val zoomTransition = true
 ```
 
 1) 2 simultaneous camera steam view
-![demo1](../art/demo1.png)
+![demo1](./art/demo1.png)
 
 2) Zoom with 2 cameras
 ![demo2](./art/demo2.png)
