@@ -1,7 +1,6 @@
 # C++ related
 /captures
 .externalNativeBuild
-CMakeLists.txt
 
 # Mac OS
 .DS_store

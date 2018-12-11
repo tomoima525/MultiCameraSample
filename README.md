@@ -1,8 +1,10 @@
 
 Sample App to demonstrate Camera2 multi-camera API
 
-** Caution: This sample only runs upon Pixel3 **
+** Caution!!: This sample only runs upon Pixel3 **
 
+## Requirements
+- Android NDK (download from `Preferences` -> `Appearance & Behavior` -> `System Settings` -> `Android SDK` ) This is actually not required for this project but I have a plan to add OpenCV so cpp setting is currently in the project.
 
 There are 2 modes available:
 
